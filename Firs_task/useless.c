@@ -1,11 +1,13 @@
-#include <stdio.h>
-#include <stdlib.h>
 #include <unistd.h>
-#include <string.h>
+#include <errno.h>
 #include <sys/wait.h>
 #include <time.h>
+#include "split_comm.h"
 
-#define MAX_LINE 1024
+
+#define MAX_ARGS 256
+
+
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -27,7 +29,7 @@ int main(int argc, char *argv[]) {
         char command[MAX_LINE];
 
         if (sscanf(line, "%d %[^\n]", &delay, command) != 2) {
-            fprintf(stderr, "Invalid line format: %s", line);
+            fprintf(stderr, "Invalid line format: %s\n", line);
             continue;
         }
 
@@ -46,16 +48,29 @@ int main(int argc, char *argv[]) {
                 sleep(delay - elapsed);
             }
 
-            execl("/bin/sh", "sh", "-c", command, (char *)NULL);
-            perror("execl"); // если не получилось
+            // // execl("/bin/sh", "sh", "-c", command, (char *)NULL);
+            // execvp(command, '');
+            // perror("execl");
+
+            char *args[MAX_ARGS];
+            int nargs = split_command(command, args, MAX_ARGS);
+            if (nargs <= 0) {
+                fprintf(stderr, "Failed to parse command: '%s'\n", command);
+                exit(1);
+            }
+
+            execvp(args[0], args);
+
+            fprintf(stderr, "execvp('%s') failed: %s\n", args[0], strerror(errno));
+
+            for (int i = 0; i < nargs; ++i) free(args[i]);
+
             exit(1);
         }
-        // Родитель идёт читать следующую строку (не ждём ребёнка)
     }
 
     fclose(file);
 
-    // Ждём завершения всех процессов
     while (wait(NULL) > 0);
 
     return 0;

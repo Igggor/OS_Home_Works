@@ -1,0 +1,4 @@
+5 ls -la
+1 ls 
+3 echo ----
+7 ./test_run.sh

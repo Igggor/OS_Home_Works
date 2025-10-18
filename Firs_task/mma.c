@@ -1,25 +1,28 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <sys/wait.h>
-#include <limits.h>
-#include <utime.h>
+#include <stdio.h>      // Для printf, fprintf
+#include <stdlib.h>     // Для EXIT_FAILURE, EXIT_SUCCESS
+#include <string.h>     // Для strcpy, strlen, strcmp, strerror
+#include <unistd.h>     // Для close, execlp, fork, unlink
+#include <sys/stat.h>   // Для struct stat, stat, mkdir, chmod
+#include <sys/types.h>  // Для типов pid_t и других
+#include <dirent.h>     // Для DIR, opendir, readdir, closedir
+#include <errno.h>      // Для errno
+#include <fcntl.h>      // Для open, O_RDONLY, O_WRONLY и флагов
+#include <sys/wait.h>   // Для waitpid, WIFEXITED, WEXITSTATUS
+#include <limits.h>     // Для PATH_MAX
+#include <utime.h>      // Для utime, struct utimbuf
 
-#define BUF_SIZE 8192
+#define BUF_SIZE 8192   // Размер буфера для чтения/записи файлов
 
+// Функция копирования файла src -> dst через временный файл
 int copy_file(const char *src, const char *dst) {
+    // Открываем исходный файл на чтение
     int in_fd = open(src, O_RDONLY);
     if (in_fd < 0) {
         fprintf(stderr, "open('%s'): %s\n", src, strerror(errno));
         return -1;
     }
 
+    // Создаем путь к временной копии dst.tmp
     char tmp_path[PATH_MAX];
     if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", dst) >= (int)sizeof(tmp_path)) {
         fprintf(stderr, "Path too long for tmp (%s)\n", dst);
@@ -27,6 +30,7 @@ int copy_file(const char *src, const char *dst) {
         return -1;
     }
 
+    // Создаем временный файл для записи
     int out_fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (out_fd < 0) {
         fprintf(stderr, "open('%s'): %s\n", tmp_path, strerror(errno));
@@ -34,25 +38,27 @@ int copy_file(const char *src, const char *dst) {
         return -1;
     }
 
+    // Буфер для копирования
     char buf[BUF_SIZE];
     ssize_t r;
     while ((r = read(in_fd, buf, sizeof(buf))) > 0) {
         ssize_t w_total = 0;
         while (w_total < r) {
+            // Запись части буфера в файл
             ssize_t w = write(out_fd, buf + w_total, r - w_total);
             if (w < 0) {
-                if (errno == EINTR) continue;
+                if (errno == EINTR) continue; // Если сигнал прервал write — повторяем
                 fprintf(stderr, "write('%s'): %s\n", tmp_path, strerror(errno));
                 close(in_fd);
                 close(out_fd);
-                unlink(tmp_path);
+                unlink(tmp_path); // удаляем временный файл
                 return -1;
             }
             w_total += w;
         }
     }
 
-    if (r < 0) {
+    if (r < 0) { // Ошибка чтения
         fprintf(stderr, "read('%s'): %s\n", src, strerror(errno));
         close(in_fd);
         close(out_fd);
@@ -60,11 +66,13 @@ int copy_file(const char *src, const char *dst) {
         return -1;
     }
 
+    // Закрываем файлы
     if (close(in_fd) < 0)
         fprintf(stderr, "close in_fd: %s\n", strerror(errno));
     if (close(out_fd) < 0)
         fprintf(stderr, "close out_fd: %s\n", strerror(errno));
 
+    // Переименовываем временный файл в конечное имя
     if (rename(tmp_path, dst) < 0) {
         fprintf(stderr, "rename('%s','%s'): %s\n", tmp_path, dst, strerror(errno));
         unlink(tmp_path);
@@ -74,17 +82,20 @@ int copy_file(const char *src, const char *dst) {
     return 0;
 }
 
+// Функция создания директории (рекурсивно, если промежуточные не существуют)
 int ensure_dir_exists(const char *path, mode_t mode) {
     struct stat st;
     if (stat(path, &st) == 0) {
-        if (S_ISDIR(st.st_mode)) return 0;
+        if (S_ISDIR(st.st_mode)) return 0; // Уже существует как директория
         fprintf(stderr, "Path exists but is not a directory: %s\n", path);
         return -1;
     }
 
+    // Пытаемся создать директорию
     if (mkdir(path, mode) == 0) return 0;
-    if (errno == EEXIST) return 0;
-    if (errno == ENOENT) {
+
+    if (errno == EEXIST) return 0; // Уже существует
+    if (errno == ENOENT) { // Не найден путь — нужно создать промежуточные директории
         char tmp[PATH_MAX];
         size_t len = strlen(path);
         if (len >= sizeof(tmp)) {
@@ -97,9 +108,7 @@ int ensure_dir_exists(const char *path, mode_t mode) {
         for (char *p = tmp + 1; *p; ++p) {
             if (*p == '/') {
                 *p = '\0';
-                if (mkdir(tmp, mode) < 0 && errno != EEXIST) {
-                    // ignore
-                }
+                mkdir(tmp, mode); // Игнорируем ошибки, кроме EEXIST
                 *p = '/';
             }
         }
@@ -114,6 +123,7 @@ int ensure_dir_exists(const char *path, mode_t mode) {
     return -1;
 }
 
+// Рекурсивное резервное копирование папки
 void backup_recursive(const char *src_dir, const char *dst_dir) {
     DIR *dir = opendir(src_dir);
     if (!dir) {
@@ -129,14 +139,8 @@ void backup_recursive(const char *src_dir, const char *dst_dir) {
         char src_path[PATH_MAX];
         char dst_path[PATH_MAX];
 
-        if (snprintf(src_path, sizeof(src_path), "%s/%s", src_dir, entry->d_name) >= (int)sizeof(src_path)) {
-            fprintf(stderr, "Source path too long: %s/%s\n", src_dir, entry->d_name);
-            continue;
-        }
-        if (snprintf(dst_path, sizeof(dst_path), "%s/%s", dst_dir, entry->d_name) >= (int)sizeof(dst_path)) {
-            fprintf(stderr, "Destination path too long: %s/%s\n", dst_dir, entry->d_name);
-            continue;
-        }
+        snprintf(src_path, sizeof(src_path), "%s/%s", src_dir, entry->d_name);
+        snprintf(dst_path, sizeof(dst_path), "%s/%s", dst_dir, entry->d_name);
 
         struct stat src_stat;
         if (lstat(src_path, &src_stat) < 0) {
@@ -145,18 +149,13 @@ void backup_recursive(const char *src_dir, const char *dst_dir) {
         }
 
         if (S_ISDIR(src_stat.st_mode)) {
-            if (ensure_dir_exists(dst_path, 0755) < 0)
-                continue; // не можем создать директорию — продолжаем с другими
-            
-            backup_recursive(src_path, dst_path);
+            ensure_dir_exists(dst_path, 0755);
+            backup_recursive(src_path, dst_path); // Рекурсивный вызов для поддиректории
         } else if (S_ISREG(src_stat.st_mode)) {
-            // файл — проверим, нужно ли копировать
             char gz_path[PATH_MAX];
-            if (snprintf(gz_path, sizeof(gz_path), "%s.gz", dst_path) >= (int)sizeof(gz_path)) {
-                fprintf(stderr, "gz path too long: %s\n", dst_path);
-                continue;
-            }
+            snprintf(gz_path, sizeof(gz_path), "%s.gz", dst_path);
 
+            // Проверяем, нужен ли копирование (если уже существует и новее)
             int need_copy = 1;
             struct stat gz_stat;
             if (stat(gz_path, &gz_stat) == 0) {
@@ -166,74 +165,38 @@ void backup_recursive(const char *src_dir, const char *dst_dir) {
 
             if (!need_copy) continue;
 
+            // Убеждаемся, что директория для файла существует
             char dst_dir_copy[PATH_MAX];
             strncpy(dst_dir_copy, dst_path, sizeof(dst_dir_copy));
             char *last_slash = strrchr(dst_dir_copy, '/');
             if (last_slash) {
                 *last_slash = '\0';
-                if (ensure_dir_exists(dst_dir_copy, 0755) < 0) {
-                    fprintf(stderr, "Failed to ensure dir %s\n", dst_dir_copy);
-                    continue;
-                }
+                ensure_dir_exists(dst_dir_copy, 0755);
             }
 
+            // Копируем файл
             printf("Copying: %s -> %s\n", src_path, dst_path);
             if (copy_file(src_path, dst_path) != 0) {
                 fprintf(stderr, "Failed to copy %s -> %s\n", src_path, dst_path);
                 continue;
             }
 
-            if (chmod(dst_path, src_stat.st_mode & 0777) < 0)
-                fprintf(stderr, "chmod('%s'): %s\n", dst_path, strerror(errno)); // не критично — продолжаем
-
+            chmod(dst_path, src_stat.st_mode & 0777); // Восстанавливаем права
             struct utimbuf times;
             times.actime = src_stat.st_atime;
             times.modtime = src_stat.st_mtime;
-            if (utime(dst_path, &times) < 0)
-                fprintf(stderr, "utime('%s'): %s\n", dst_path, strerror(errno));
+            utime(dst_path, &times); // Восстанавливаем время
 
+            // Сжимаем файл через gzip
             pid_t pid = fork();
-            if (pid < 0) {
-                fprintf(stderr, "fork() failed: %s\n", strerror(errno));
-                unlink(dst_path);
-                continue;
-            }
-
             if (pid == 0) {
                 execlp("gzip", "gzip", "-f", dst_path, (char *)NULL);
-                fprintf(stderr, "execlp(gzip) failed: %s\n", strerror(errno));
-                _exit(127);
-            } 
-            else {
+                _exit(127); // Если execlp не сработал
+            } else {
                 int status;
-                pid_t w = waitpid(pid, &status, 0);
-                if (w < 0) {
-                    fprintf(stderr, "waitpid failed: %s\n", strerror(errno));
-                    unlink(dst_path);
-                    continue;
-                }
-                if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-                    fprintf(stderr, "gzip failed for '%s' (status=%d). Removing '%s'\n",
-                            dst_path, WIFEXITED(status) ? WEXITSTATUS(status) : -1, dst_path);
-                    unlink(dst_path);
-                    continue;
-                }
-
-                if (chmod(gz_path, src_stat.st_mode & 0777) < 0)
-                    fprintf(stderr, "chmod('%s'): %s\n", gz_path, strerror(errno)); // не критично, но сообщим
-
-                struct utimbuf gz_times;
-                gz_times.actime = src_stat.st_atime;
-                gz_times.modtime = src_stat.st_mtime;
-                if (utime(gz_path, &gz_times) < 0)
-                    fprintf(stderr, "utime('%s'): %s\n", gz_path, strerror(errno));
-
-                printf("Compressed: %s -> %s.gz\n", dst_path, dst_path);
+                waitpid(pid, &status, 0); // Ждем завершения gzip
             }
-        } 
-        else 
-            fprintf(stderr, "Skipping non-regular file: %s\n", src_path); // Для симлинков и других типов файлов — предупреждение и пропуск
-
+        }
     }
 
     closedir(dir);
@@ -258,11 +221,7 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    if (ensure_dir_exists(dst, 0755) < 0) {
-        fprintf(stderr, "Failed to create or access destination '%s'\n", dst);
-        return EXIT_FAILURE;
-    }
-
+    ensure_dir_exists(dst, 0755);
     backup_recursive(src, dst);
     return EXIT_SUCCESS;
 }
