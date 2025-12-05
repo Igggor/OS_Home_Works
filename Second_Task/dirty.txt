@@ -1,0 +1,3 @@
+plate: 3
+cup: 2
+glass: 4
